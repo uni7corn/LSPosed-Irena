@@ -57,6 +57,7 @@ Notice: These community groups don't accept any bug report, please use [Get help
 - [Dobby](https://github.com/jmpews/Dobby): used for inline hooking
 - [LSPlant](https://github.com/LSPosed/LSPlant): the core ART hooking framework
 - [LSPosed](https://github.com/LSPosed/LSPosed): fork source
+- [EdXposed](https://github.com/ElderDrivers/EdXposed): LSPosed fork source
 - [xz_embedded](https://github.com/tukaani-project/xz-embedded):decompress debug_info section into stripped libraries
 - [system_properties](https://github.com/topjohnwu/system_properties):switch properties access within LSPosed
 - ~[SandHook](https://github.com/ganyao114/SandHook/): ART hooking framework for SandHook variant~
