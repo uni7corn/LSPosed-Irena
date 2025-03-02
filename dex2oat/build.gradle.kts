@@ -40,7 +40,7 @@ android {
             path("src/main/cpp/CMakeLists.txt")
         }
     }
-    ndkVersion = "28.0.13004108"
+    ndkVersion = "27.2.12479018"
 
     prefab {
         register("dex2oat")
