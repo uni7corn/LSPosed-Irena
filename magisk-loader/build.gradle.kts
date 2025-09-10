@@ -76,26 +76,27 @@ android {
     }
 
     productFlavors {
-        all {
-            externalNativeBuild {
-                cmake {
-                    arguments += "-DMODULE_NAME=${name.lowercase()}_$moduleBaseId"
-                    arguments += "-DAPI=${name.lowercase()}"
-                }
-            }
-        }
-
         create("Zygisk") {
             dimension = "api"
-            externalNativeBuild {
-                cmake {
-                    arguments += "-DAPI_VERSION=1"
-                }
-            }
         }
     }
     namespace = "org.lsposed.lspd"
 }
+
+cmaker {
+    default {
+        arguments += arrayOf(
+            "-DMODULE_NAME=${name.lowercase()}_$moduleBaseId",
+            "-DAPI=${name.lowercase()}",
+            "-DAPI_VERSION=1",
+            "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON",
+            "-DCMAKE_VISIBILITY_INLINES_HIDDEN=ON",
+            "-DCMAKE_CXX_VISIBILITY_PRESET=hidden",
+            "-DCMAKE_C_VISIBILITY_PRESET=hidden",
+        )
+    }
+}
+
 abstract class Injected @Inject constructor(val magiskDir: String) {
     @get:Inject
     abstract val factory: ObjectFactory
