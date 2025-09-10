@@ -950,6 +950,7 @@ public class ConfigManager {
     private boolean removeModuleWithoutCache(String packageName) {
         if (packageName.equals("lspd")) return false;
         boolean res = executeInTransaction(() -> db.delete("modules", "module_pkg_name = ?", new String[]{packageName}) > 0);
+        removeBlockedScopeRequest(packageName);
         try {
             for (var user : UserService.getUsers()) {
                 removeModulePrefs(user.id, packageName);
