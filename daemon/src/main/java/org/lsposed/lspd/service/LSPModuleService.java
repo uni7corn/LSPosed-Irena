@@ -47,6 +47,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.service.IXposedScopeCallback;
 import io.github.libxposed.service.IXposedService;
 
@@ -59,6 +60,8 @@ public class LSPModuleService extends IXposedService.Stub {
     private final static Set<ModuleBinderKey> sendingBinderSet = ConcurrentHashMap.newKeySet();
     private final static Map<Module, LSPModuleService> serviceMap = Collections.synchronizedMap(new WeakHashMap<>());
     private final static ExecutorService binderExecutor = Executors.newSingleThreadExecutor(r -> new Thread(r, "module-binder-delivery"));
+
+    static final int XPOSED_API_VERSION = XposedInterface.LIB_API;
 
     public final static String FILES_DIR = "files";
 
@@ -222,7 +225,7 @@ public class LSPModuleService extends IXposedService.Stub {
     @Override
     public int getAPIVersion() throws RemoteException {
         ensureModule();
-        return API;
+        return XPOSED_API_VERSION;
     }
 
     @Override

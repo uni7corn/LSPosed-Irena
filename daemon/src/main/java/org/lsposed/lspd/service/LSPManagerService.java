@@ -269,7 +269,7 @@ public class LSPManagerService extends ILSPManagerService.Stub {
 
     @Override
     public int getXposedApiVersion() {
-        return IXposedService.API;
+        return LSPModuleService.XPOSED_API_VERSION;
     }
 
     @Override

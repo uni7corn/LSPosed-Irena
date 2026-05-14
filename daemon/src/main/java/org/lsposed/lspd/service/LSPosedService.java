@@ -25,6 +25,7 @@ import static org.lsposed.lspd.service.LSPNotificationManager.UPDATED_CHANNEL_ID
 import static org.lsposed.lspd.service.PackageService.PER_USER_RANGE;
 import static org.lsposed.lspd.service.ServiceManager.TAG;
 import static org.lsposed.lspd.service.ServiceManager.getExecutorService;
+import static org.lsposed.lspd.service.ServiceManager.toGlobalNamespace;
 
 import android.app.IApplicationThread;
 import android.app.IUidObserver;
@@ -73,7 +74,7 @@ public class LSPosedService extends ILSPosedService.Stub {
             apks[info.splitSourceDirs.length] = info.sourceDir;
         } else apks = new String[]{info.sourceDir};
         for (var apk : apks) {
-            try (var zip = new ZipFile(apk)) {
+            try (var zip = new ZipFile(toGlobalNamespace(apk))) {
                 if (zip.getEntry("META-INF/xposed/java_init.list") != null) {
                     return true;
                 }
@@ -163,8 +164,12 @@ public class LSPosedService extends ILSPosedService.Stub {
                     // When installing a new Xposed module, we update the apk path to mark it as a
                     // module to send a broadcast when modules that have not been activated are
                     // uninstalled.
-                    // If cache not updated, assume it's not xposed module
-                    isXposedModule = ConfigManager.getInstance().updateModuleApkPath(moduleName, ConfigManager.getInstance().getModuleApkPath(applicationInfo), false);
+                    // Deprecated modern modules are still Xposed modules for manager UI, even when
+                    // they do not have a daemon-loadable apk path.
+                    var moduleApkPath = ConfigManager.getInstance().getModuleApkPath(applicationInfo);
+                    if (moduleApkPath != null) {
+                        ConfigManager.getInstance().updateModuleApkPath(moduleName, moduleApkPath, false);
+                    }
                 } else if (ConfigManager.getInstance().isUidHooked(uid)) {
                     // it will auto update obsolete scope from database
                     ConfigManager.getInstance().updateAppCache();

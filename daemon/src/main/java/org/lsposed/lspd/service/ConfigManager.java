@@ -772,18 +772,46 @@ public class ConfigManager {
             apks = Arrays.copyOf(info.splitSourceDirs, info.splitSourceDirs.length + 1);
             apks[info.splitSourceDirs.length] = info.sourceDir;
         } else apks = new String[]{info.sourceDir};
-        var apkPath = Arrays.stream(apks).parallel().filter(apk -> {
+        var modernApkPath = Arrays.stream(apks).filter(apk -> {
             if (apk == null) {
                 Log.w(TAG, info.packageName + " has null apk path???");
                 return false;
             }
             try (var zip = new ZipFile(toGlobalNamespace(apk))) {
-                return zip.getEntry("META-INF/xposed/java_init.list") != null || zip.getEntry("assets/xposed_init") != null;
+                return ConfigFileManager.readModernModuleProperties(zip) != null;
             } catch (IOException e) {
                 return false;
             }
         }).findFirst();
-        return apkPath.orElse(null);
+        if (modernApkPath.isPresent()) {
+            return modernApkPath.get();
+        }
+        var requiresModernLoading = Arrays.stream(apks).anyMatch(apk -> {
+            if (apk == null) {
+                Log.w(TAG, info.packageName + " has null apk path???");
+                return false;
+            }
+            try (var zip = new ZipFile(toGlobalNamespace(apk))) {
+                return ConfigFileManager.requiresModernModuleLoading(zip);
+            } catch (IOException e) {
+                return false;
+            }
+        });
+        if (requiresModernLoading) {
+            return null;
+        }
+        var legacyApkPath = Arrays.stream(apks).filter(apk -> {
+            if (apk == null) {
+                Log.w(TAG, info.packageName + " has null apk path???");
+                return false;
+            }
+            try (var zip = new ZipFile(toGlobalNamespace(apk))) {
+                return zip.getEntry("assets/xposed_init") != null;
+            } catch (IOException e) {
+                return false;
+            }
+        }).findFirst();
+        return legacyApkPath.orElse(null);
     }
 
     public boolean updateModuleApkPath(String packageName, String apkPath, boolean force) {

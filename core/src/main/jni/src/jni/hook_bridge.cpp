@@ -21,23 +21,20 @@
 #include "native_util.h"
 #include "lsplant.hpp"
 #include <parallel_hashmap/phmap.h>
+#include <array>
+#include <cstdio>
 #include <limits>
 #include <memory>
 #include <shared_mutex>
 #include <mutex>
 #include <set>
+#include <unistd.h>
 
 using namespace lsplant;
 
 namespace {
-struct ModuleCallback {
-    jmethodID before_method;
-    jmethodID after_method;
-};
-
 struct HookItem {
-    std::multimap<jint, jobject, std::greater<>> legacy_callbacks;
-    std::multimap<jint, ModuleCallback, std::greater<>> modern_callbacks;
+    std::multimap<jint, jobject, std::greater<>> callbacks;
 private:
     std::atomic<jobject> backup {nullptr};
     static_assert(decltype(backup)::is_always_lock_free);
@@ -66,12 +63,9 @@ using SharedHashMap = phmap::parallel_flat_hash_map<K, V, Hash, Eq, Alloc, N, st
 
 SharedHashMap<jmethodID, std::unique_ptr<HookItem>> hooked_methods;
 
-jmethodID callback_ctor = nullptr;
-jfieldID before_method_field = nullptr;
-jfieldID after_method_field = nullptr;
-
 struct InvokeCache {
     jclass object_class;
+    jclass class_class;
     jclass executable_class;
     jclass method_class;
     jclass constructor_class;
@@ -99,6 +93,7 @@ struct InvokeCache {
 
     jmethodID executable_get_declaring_class;
     jmethodID executable_get_parameter_types;
+    jmethodID class_get_type_name;
     jmethodID method_get_return_type;
     jmethodID method_invoke;
     jmethodID constructor_new_instance;
@@ -148,6 +143,7 @@ InvokeCache &GetInvokeCache(JNIEnv *env) {
     static auto cache = [env] {
         InvokeCache c {};
         c.object_class = NewGlobalClassRef(env, "java/lang/Object");
+        c.class_class = NewGlobalClassRef(env, "java/lang/Class");
         c.executable_class = NewGlobalClassRef(env, "java/lang/reflect/Executable");
         c.method_class = NewGlobalClassRef(env, "java/lang/reflect/Method");
         c.constructor_class = NewGlobalClassRef(env, "java/lang/reflect/Constructor");
@@ -173,9 +169,10 @@ InvokeCache &GetInvokeCache(JNIEnv *env) {
         c.short_type = GetPrimitiveType(env, c.short_class);
 
         c.executable_get_declaring_class = env->GetMethodID(c.executable_class, "getDeclaringClass",
-                                                            "()Ljava/lang/Class;");
+                                                             "()Ljava/lang/Class;");
         c.executable_get_parameter_types = env->GetMethodID(c.executable_class, "getParameterTypes",
-                                                            "()[Ljava/lang/Class;");
+                                                             "()[Ljava/lang/Class;");
+        c.class_get_type_name = env->GetMethodID(c.class_class, "getTypeName", "()Ljava/lang/String;");
         c.method_get_return_type = env->GetMethodID(c.method_class, "getReturnType", "()Ljava/lang/Class;");
         c.method_invoke = env->GetMethodID(c.method_class, "invoke",
                                            "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;");
@@ -209,6 +206,51 @@ void Throw(JNIEnv *env, const char *type, const char *message) {
 
 void ThrowArgumentTypeMismatch(JNIEnv *env) {
     Throw(env, "java/lang/IllegalArgumentException", "argument type mismatch");
+}
+
+void ThrowUnexpectedReceiverException(JNIEnv *env, InvokeCache &cache, jclass expected, jclass actual) {
+    ScopedLocalRef<jstring> expected_type_jstr(env, reinterpret_cast<jstring>(
+            env->CallObjectMethod(expected, cache.class_get_type_name)));
+    if (!expected_type_jstr || env->ExceptionCheck()) return;
+
+    auto expected_type = env->GetStringUTFChars(expected_type_jstr.get(), nullptr);
+    if (expected_type == nullptr || env->ExceptionCheck()) return;
+
+    ScopedLocalRef<jstring> actual_type_jstr(env, reinterpret_cast<jstring>(
+            env->CallObjectMethod(actual, cache.class_get_type_name)));
+    if (!actual_type_jstr || env->ExceptionCheck()) {
+        env->ReleaseStringUTFChars(expected_type_jstr.get(), expected_type);
+        return;
+    }
+
+    auto actual_type = env->GetStringUTFChars(actual_type_jstr.get(), nullptr);
+    if (actual_type == nullptr || env->ExceptionCheck()) {
+        env->ReleaseStringUTFChars(expected_type_jstr.get(), expected_type);
+        return;
+    }
+
+    std::array<char, 1024> msg {};
+    std::snprintf(msg.data(), msg.size(), "Expected receiver of type %s, but got %s",
+                  expected_type, actual_type);
+    env->ReleaseStringUTFChars(actual_type_jstr.get(), actual_type);
+    env->ReleaseStringUTFChars(expected_type_jstr.get(), expected_type);
+
+    Throw(env, "java/lang/IllegalArgumentException", msg.data());
+}
+
+void ThrowUnexpectedReceiverException(JNIEnv *env, InvokeCache &cache, jclass expected, jobject actual) {
+    if (actual == nullptr) {
+        Throw(env, "java/lang/IllegalArgumentException", "object is not an instance of declaring class");
+        return;
+    }
+
+    ScopedLocalRef<jclass> actual_class(env, env->GetObjectClass(actual));
+    if (!actual_class || env->ExceptionCheck()) {
+        Throw(env, "java/lang/IllegalArgumentException", "object is not an instance of declaring class");
+        return;
+    }
+
+    ThrowUnexpectedReceiverException(env, cache, expected, actual_class.get());
 }
 
 jchar TypeShorty(JNIEnv *env, InvokeCache &cache, jclass type) {
@@ -388,6 +430,28 @@ ScopedLocalRef<jobject> AllocateReceiver(JNIEnv *env, jclass cls) {
     return ScopedLocalRef<jobject>(env, env->AllocObject(cls));
 }
 
+ScopedLocalRef<jobject> AllocateSpecialReceiver(JNIEnv *env, InvokeCache &cache, jobject constructor,
+                                                jclass alloc_class) {
+    if (constructor == nullptr) {
+        Throw(env, "java/lang/NullPointerException", "constructor == null");
+        return ScopedLocalRef<jobject>(env);
+    }
+    if (alloc_class == nullptr) {
+        Throw(env, "java/lang/NullPointerException", "subClass == null");
+        return ScopedLocalRef<jobject>(env);
+    }
+
+    ScopedLocalRef<jclass> declaring_class(env, (jclass) env->CallObjectMethod(
+            constructor, cache.executable_get_declaring_class));
+    if (env->ExceptionCheck()) return ScopedLocalRef<jobject>(env);
+
+    if (!env->IsAssignableFrom(alloc_class, declaring_class.get())) {
+        ThrowUnexpectedReceiverException(env, cache, declaring_class.get(), alloc_class);
+        return ScopedLocalRef<jobject>(env);
+    }
+    return AllocateReceiver(env, alloc_class);
+}
+
 jobject BoxPrimitiveResult(JNIEnv *env, InvokeCache &cache, jchar type, jvalue value) {
     switch (type) {
         case 'I':
@@ -461,9 +525,14 @@ jobject InvokeSpecial(JNIEnv *env, jobject method, jclass alloc_class, jobject t
     if (env->ExceptionCheck()) return nullptr;
 
     auto is_constructor = env->IsInstanceOf(method, cache.constructor_class);
+    if (alloc_class != nullptr && !is_constructor) {
+        Throw(env, "java/lang/IllegalArgumentException", "clazz is only supported for constructors");
+        return nullptr;
+    }
+
     ScopedLocalRef<jobject> allocated_receiver(env);
     if (thiz == nullptr && is_constructor && alloc_class != nullptr) {
-        allocated_receiver = AllocateReceiver(env, alloc_class);
+        allocated_receiver = AllocateSpecialReceiver(env, cache, method, alloc_class);
         if (env->ExceptionCheck()) return nullptr;
         thiz = allocated_receiver.get();
     }
@@ -472,7 +541,7 @@ jobject InvokeSpecial(JNIEnv *env, jobject method, jclass alloc_class, jobject t
         return nullptr;
     }
     if (!env->IsInstanceOf(thiz, declaring_class.get())) {
-        Throw(env, "java/lang/IllegalArgumentException", "object is not an instance of declaring class");
+        ThrowUnexpectedReceiverException(env, cache, declaring_class.get(), thiz);
         return nullptr;
     }
 
@@ -546,8 +615,8 @@ jobject NewInstance(JNIEnv *env, InvokeCache &cache, jobject constructor, jobjec
 }
 
 namespace lspd {
-LSP_DEF_NATIVE_METHOD(jboolean, HookBridge, hookMethod, jboolean useModernApi, jobject hookMethod,
-                      jclass hooker, jint priority, jobject callback) {
+LSP_DEF_NATIVE_METHOD(jboolean, HookBridge, hookMethod, jobject hookMethod, jclass hooker,
+                      jint priority, jobject callback) {
     bool newHook = false;
 #ifndef NDEBUG
     struct finally {
@@ -586,27 +655,11 @@ LSP_DEF_NATIVE_METHOD(jboolean, HookBridge, hookMethod, jboolean useModernApi, j
     jobject backup = hook_item->GetBackup();
     if (!backup) return JNI_FALSE;
     JNIMonitor monitor(env, backup);
-    if (useModernApi) {
-        if (before_method_field == nullptr) {
-            auto callback_class = JNI_GetObjectClass(env, callback);
-            callback_ctor = JNI_GetMethodID(env, callback_class, "<init>", "(Ljava/lang/reflect/Method;Ljava/lang/reflect/Method;)V");
-            before_method_field = JNI_GetFieldID(env, callback_class, "beforeInvocation", "Ljava/lang/reflect/Method;");
-            after_method_field = JNI_GetFieldID(env, callback_class, "afterInvocation", "Ljava/lang/reflect/Method;");
-        }
-        auto before_method = JNI_GetObjectField(env, callback, before_method_field);
-        auto after_method = JNI_GetObjectField(env, callback, after_method_field);
-        auto callback_type = ModuleCallback {
-                .before_method = env->FromReflectedMethod(before_method.get()),
-                .after_method = env->FromReflectedMethod(after_method.get()),
-        };
-        hook_item->modern_callbacks.emplace(priority, callback_type);
-    } else {
-        hook_item->legacy_callbacks.emplace(priority, env->NewGlobalRef(callback));
-    }
+    hook_item->callbacks.emplace(priority, env->NewGlobalRef(callback));
     return JNI_TRUE;
 }
 
-LSP_DEF_NATIVE_METHOD(jboolean, HookBridge, unhookMethod, jboolean useModernApi, jobject hookMethod, jobject callback) {
+LSP_DEF_NATIVE_METHOD(jboolean, HookBridge, unhookMethod, jobject hookMethod, jobject callback) {
     auto target = env->FromReflectedMethod(hookMethod);
     HookItem * hook_item = nullptr;
     hooked_methods.if_contains(target, [&hook_item](const auto &it) {
@@ -616,29 +669,17 @@ LSP_DEF_NATIVE_METHOD(jboolean, HookBridge, unhookMethod, jboolean useModernApi,
     jobject backup = hook_item->GetBackup();
     if (!backup) return JNI_FALSE;
     JNIMonitor monitor(env, backup);
-    if (useModernApi) {
-        auto before_method = JNI_GetObjectField(env, callback, before_method_field);
-        auto before = env->FromReflectedMethod(before_method.get());
-        for (auto i = hook_item->modern_callbacks.begin(); i != hook_item->modern_callbacks.end(); ++i) {
-            if (before == i->second.before_method) {
-                hook_item->modern_callbacks.erase(i);
-                return JNI_TRUE;
-            }
-        }
-    } else {
-        for (auto i = hook_item->legacy_callbacks.begin(); i != hook_item->legacy_callbacks.end(); ++i) {
-            if (env->IsSameObject(i->second, callback)) {
-                env->DeleteGlobalRef(i->second);
-                hook_item->legacy_callbacks.erase(i);
-                return JNI_TRUE;
-            }
+    for (auto i = hook_item->callbacks.begin(); i != hook_item->callbacks.end(); ++i) {
+        if (env->IsSameObject(i->second, callback)) {
+            env->DeleteGlobalRef(i->second);
+            hook_item->callbacks.erase(i);
+            return JNI_TRUE;
         }
     }
     return JNI_FALSE;
 }
 
-LSP_DEF_NATIVE_METHOD(jboolean, HookBridge, deoptimizeMethod, jobject hookMethod,
-                      jclass hooker, jint priority, jobject callback) {
+LSP_DEF_NATIVE_METHOD(jboolean, HookBridge, deoptimizeMethod, jobject hookMethod) {
     return lsplant::Deoptimize(env, hookMethod);
 }
 
@@ -667,11 +708,20 @@ LSP_DEF_NATIVE_METHOD(jobject, HookBridge, invokeOriginalMethod, jobject hookMet
 
 LSP_DEF_NATIVE_METHOD(jobject, HookBridge, findClassInitializer, jclass cls) {
     auto clinit = env->GetStaticMethodID(cls, "<clinit>", "()V");
+    if (clinit == nullptr) {
+        env->ExceptionClear();
+        return nullptr;
+    }
     return env->ToReflectedMethod(cls, clinit, JNI_TRUE);
 }
 
 LSP_DEF_NATIVE_METHOD(jobject, HookBridge, allocateObject, jclass cls) {
     return env->AllocObject(cls);
+}
+
+LSP_DEF_NATIVE_METHOD(jobject, HookBridge, allocateSpecialReceiver, jobject constructor, jclass cls) {
+    auto &cache = GetInvokeCache(env);
+    return AllocateSpecialReceiver(env, cache, constructor, cls).release();
 }
 
 LSP_DEF_NATIVE_METHOD(jobject, HookBridge, invokeSpecialMethod, jobject method, jclass cls,
@@ -683,41 +733,42 @@ LSP_DEF_NATIVE_METHOD(jboolean, HookBridge, instanceOf, jobject object, jclass e
     return env->IsInstanceOf(object, expected_class);
 }
 
+LSP_DEF_NATIVE_METHOD(jint, HookBridge, gettid) {
+    return gettid();
+}
+
 LSP_DEF_NATIVE_METHOD(jboolean, HookBridge, setTrusted, jobject cookie) {
     return lsplant::MakeDexFileTrusted(env, cookie);
 }
 
-LSP_DEF_NATIVE_METHOD(jobjectArray, HookBridge, callbackSnapshot, jclass callback_class, jobject method) {
+LSP_DEF_NATIVE_METHOD(jobjectArray, HookBridge, callbackSnapshot, jobject method, jint maxPriority) {
     auto target = env->FromReflectedMethod(method);
+    auto object_class = env->FindClass("java/lang/Object");
     HookItem *hook_item = nullptr;
     hooked_methods.if_contains(target, [&hook_item](const auto &it) {
         hook_item = it.second.get();
     });
-    if (!hook_item) return nullptr;
+    if (!hook_item) return env->NewObjectArray(0, object_class, nullptr);
     jobject backup = hook_item->GetBackup();
-    if (!backup) return nullptr;
+    if (!backup) return env->NewObjectArray(0, object_class, nullptr);
     JNIMonitor monitor(env, backup);
 
-    auto res = env->NewObjectArray(2, env->FindClass("[Ljava/lang/Object;"), nullptr);
-    auto modern = env->NewObjectArray((jsize) hook_item->modern_callbacks.size(), env->FindClass("java/lang/Object"), nullptr);
-    auto legacy = env->NewObjectArray((jsize) hook_item->legacy_callbacks.size(), env->FindClass("java/lang/Object"), nullptr);
-    for (jsize i = 0; auto callback: hook_item->modern_callbacks) {
-        auto before_method = JNI_ToReflectedMethod(env, clazz, callback.second.before_method, JNI_TRUE);
-        auto after_method = JNI_ToReflectedMethod(env, clazz, callback.second.after_method, JNI_TRUE);
-        auto callback_object = JNI_NewObject(env, callback_class, callback_ctor, before_method, after_method);
-        env->SetObjectArrayElement(modern, i++, env->NewLocalRef(callback_object.get()));
+    jsize count = 0;
+    for (auto callback: hook_item->callbacks) {
+        if (callback.first <= maxPriority) count++;
     }
-    for (jsize i = 0; auto callback: hook_item->legacy_callbacks) {
-        env->SetObjectArrayElement(legacy, i++, env->NewLocalRef(callback.second));
+    auto res = env->NewObjectArray(count, object_class, nullptr);
+    for (jsize i = 0; auto callback: hook_item->callbacks) {
+        if (callback.first <= maxPriority) {
+            env->SetObjectArrayElement(res, i++, env->NewLocalRef(callback.second));
+        }
     }
-    env->SetObjectArrayElement(res, 0, modern);
-    env->SetObjectArrayElement(res, 1, legacy);
     return res;
 }
 
 static JNINativeMethod gMethods[] = {
-    LSP_NATIVE_METHOD(HookBridge, hookMethod, "(ZLjava/lang/reflect/Executable;Ljava/lang/Class;ILjava/lang/Object;)Z"),
-    LSP_NATIVE_METHOD(HookBridge, unhookMethod, "(ZLjava/lang/reflect/Executable;Ljava/lang/Object;)Z"),
+    LSP_NATIVE_METHOD(HookBridge, hookMethod, "(Ljava/lang/reflect/Executable;Ljava/lang/Class;ILjava/lang/Object;)Z"),
+    LSP_NATIVE_METHOD(HookBridge, unhookMethod, "(Ljava/lang/reflect/Executable;Ljava/lang/Object;)Z"),
     LSP_NATIVE_METHOD(HookBridge, deoptimizeMethod, "(Ljava/lang/reflect/Executable;)Z"),
     LSP_NATIVE_METHOD(HookBridge, invokeOriginalMethod,
                       "(Ljava/lang/reflect/Executable;Ljava/lang/Object;[Ljava/lang/Object;Z)Ljava/lang/Object;"),
@@ -726,9 +777,13 @@ static JNINativeMethod gMethods[] = {
             "(Ljava/lang/reflect/Executable;Ljava/lang/Class;"
             "Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;"),
     LSP_NATIVE_METHOD(HookBridge, allocateObject, "(Ljava/lang/Class;)Ljava/lang/Object;"),
+    LSP_NATIVE_METHOD(HookBridge, allocateSpecialReceiver,
+                      "(Ljava/lang/reflect/Constructor;Ljava/lang/Class;)Ljava/lang/Object;"),
+    LSP_NATIVE_METHOD(HookBridge, findClassInitializer, "(Ljava/lang/Class;)Ljava/lang/reflect/Method;"),
     LSP_NATIVE_METHOD(HookBridge, instanceOf, "(Ljava/lang/Object;Ljava/lang/Class;)Z"),
+    LSP_NATIVE_METHOD(HookBridge, gettid, "()I"),
     LSP_NATIVE_METHOD(HookBridge, setTrusted, "(Ljava/lang/Object;)Z"),
-    LSP_NATIVE_METHOD(HookBridge, callbackSnapshot, "(Ljava/lang/Class;Ljava/lang/reflect/Executable;)[[Ljava/lang/Object;"),
+    LSP_NATIVE_METHOD(HookBridge, callbackSnapshot, "(Ljava/lang/reflect/Executable;I)[Ljava/lang/Object;"),
 };
 
 void RegisterHookBridge(JNIEnv *env) {
