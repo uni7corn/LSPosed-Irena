@@ -1,9 +1,16 @@
 name: Core
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+  push:
+    branches: [ dev ]
+    tags: [ v* ]
+  pull_request:
+  merge_group:
 
 jobs:
   build:
+    name: Build
     runs-on: ubuntu-latest
     env:
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
@@ -36,9 +43,13 @@ jobs:
           java-version: 21
 
       - name: Setup Gradle
-        uses: gradle/gradle-build-action@v3
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
         with:
-          gradle-home-cache-cleanup: true
+          log-accepted-android-sdk-licenses: 'false'
+          packages: ''
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -53,14 +64,16 @@ jobs:
         with:
           version: 1.12.1
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9.9.0
-
       - name: Remove Android's cmake
         shell: bash
         run: rm -rf $ANDROID_HOME/cmake
+
+      - name: Configure Gradle properties
+        run: |
+          echo 'org.gradle.caching=true' >> ~/.gradle/gradle.properties
+          echo 'org.gradle.parallel=true' >> ~/.gradle/gradle.properties
+          echo 'org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' >> ~/.gradle/gradle.properties
+          echo 'android.native.buildOutput=verbose' >> ~/.gradle/gradle.properties
 
       - name: Build with Gradle
         run: |

@@ -65,14 +65,13 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            proguardFiles("proguard-rules.pro")
         }
     }
 
     sourceSets {
         named("main") {
             res {
-                srcDirs("src/common/res")
+                directories += "src/common/res"
             }
         }
     }
@@ -155,8 +154,6 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(projects.services.managerService)
 
-    debugImplementation(libs.appcenter.analytics)
-    debugImplementation(libs.appcenter.crashes)
 }
 
 configurations.all {

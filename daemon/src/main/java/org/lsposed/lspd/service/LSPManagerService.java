@@ -127,9 +127,13 @@ public class LSPManagerService extends ILSPManagerService.Stub {
     }
 
     private static Intent getManagerIntent() {
-        if (managerIntent != null) return managerIntent;
         try {
-            var intent = PackageService.getLaunchIntentForPackage(BuildConfig.MANAGER_INJECTED_PKG_NAME);
+            var managerPackageName = BuildConfig.DEFAULT_MANAGER_PACKAGE_NAME;
+            var intent = PackageService.getLaunchIntentForPackage(managerPackageName);
+            if (intent == null) {
+                managerPackageName = BuildConfig.MANAGER_INJECTED_PKG_NAME;
+                intent = PackageService.getLaunchIntentForPackage(managerPackageName);
+            }
             if (intent == null) {
                 var pkgInfo = PackageService.getPackageInfo(BuildConfig.MANAGER_INJECTED_PKG_NAME, PackageManager.GET_ACTIVITIES, 0);
                 if (pkgInfo != null && pkgInfo.activities != null && pkgInfo.activities.length > 0) {
@@ -138,6 +142,7 @@ public class LSPManagerService extends ILSPManagerService.Stub {
                             intent = new Intent();
                             intent.setComponent(new ComponentName(activityInfo.packageName, activityInfo.name));
                             intent.setAction(Intent.ACTION_MAIN);
+                            intent.setPackage(BuildConfig.MANAGER_INJECTED_PKG_NAME);
                             break;
                         }
                     }
@@ -146,7 +151,7 @@ public class LSPManagerService extends ILSPManagerService.Stub {
             if (intent != null) {
                 if (intent.getCategories() != null) intent.getCategories().clear();
                 intent.addCategory("org.lsposed.manager.LAUNCH_MANAGER");
-                intent.setPackage(BuildConfig.MANAGER_INJECTED_PKG_NAME);
+                intent.setPackage(managerPackageName);
                 managerIntent = new Intent(intent);
             }
         } catch (RemoteException e) {
@@ -161,6 +166,13 @@ public class LSPManagerService extends ILSPManagerService.Stub {
         intent = new Intent(intent);
         intent.setData(withData);
         try {
+            var guard = ServiceManager.getManagerService().guard;
+            if (guard == null || !guard.isAlive()) {
+                var packageName = intent.getPackage();
+                if (packageName != null) {
+                    ActivityManagerService.forceStopPackage(packageName, 0);
+                }
+            }
             ActivityManagerService.startActivityAsUserWithFeature("android", null, intent, intent.getType(), null, null, 0, 0, null, null, 0);
         } catch (RemoteException e) {
             Log.e(TAG, "failed to open manager");
@@ -169,17 +181,18 @@ public class LSPManagerService extends ILSPManagerService.Stub {
 
     @SuppressLint("WrongConstant")
     public static void broadcastIntent(Intent inIntent) {
+        String managerPackageName = ConfigManager.isManagerInstalled() ? BuildConfig.DEFAULT_MANAGER_PACKAGE_NAME : BuildConfig.MANAGER_INJECTED_PKG_NAME;
         var intent = new Intent("org.lsposed.manager.NOTIFICATION");
         intent.putExtra(Intent.EXTRA_INTENT, inIntent);
         intent.addFlags(0x01000000); //Intent.FLAG_RECEIVER_INCLUDE_BACKGROUND
         intent.addFlags(0x00400000); //Intent.FLAG_RECEIVER_FROM_SHELL
-        intent.setPackage(BuildConfig.MANAGER_INJECTED_PKG_NAME);
+        intent.setPackage(managerPackageName);
         try {
             ActivityManagerService.broadcastIntentWithFeature(null, intent,
                     null, null, 0, null, null,
                     null, -1, null, true, false,
                     0);
-            intent.setPackage(BuildConfig.DEFAULT_MANAGER_PACKAGE_NAME);
+            intent.setPackage(managerPackageName);
             ActivityManagerService.broadcastIntentWithFeature(null, intent,
                     null, null, 0, null, null,
                     null, -1, null, true, false,
@@ -191,7 +204,7 @@ public class LSPManagerService extends ILSPManagerService.Stub {
 
     private void ensureWebViewPermission(File f) {
         if (!f.exists()) return;
-        SELinux.setFileContext(f.getAbsolutePath(), "u:object_r:magisk_file:s0");
+        SELinux.setFileContext(f.getAbsolutePath(), "u:object_r:lsposed_file:s0");
         try {
             Os.chown(f.getAbsolutePath(), BuildConfig.MANAGER_INJECTED_UID, BuildConfig.MANAGER_INJECTED_UID);
         } catch (ErrnoException e) {
@@ -226,7 +239,7 @@ public class LSPManagerService extends ILSPManagerService.Stub {
 
     // return true to inject manager
     synchronized boolean shouldStartManager(int pid, int uid, String processName) {
-        if (!enabled || uid != BuildConfig.MANAGER_INJECTED_UID || !BuildConfig.DEFAULT_MANAGER_PACKAGE_NAME.equals(processName) || !pendingManager)
+        if (!enabled || uid != BuildConfig.MANAGER_INJECTED_UID || !BuildConfig.DEFAULT_MANAGER_PACKAGE_NAME.equals(processName))
             return false;
         pendingManager = false;
         managerPid = pid;
@@ -263,12 +276,12 @@ public class LSPManagerService extends ILSPManagerService.Stub {
 
     @Override
     public IBinder asBinder() {
-        return this;
+        return super.asBinder();
     }
 
     @Override
     public int getXposedApiVersion() {
-        return IXposedService.API;
+        return LSPModuleService.XPOSED_API_VERSION;
     }
 
     @Override
@@ -292,13 +305,13 @@ public class LSPManagerService extends ILSPManagerService.Stub {
     }
 
     @Override
-    public String[] enabledModules() {
+    public List<Application> enabledModules() {
         return ConfigManager.getInstance().enabledModules();
     }
 
     @Override
-    public boolean enableModule(String packageName) throws RemoteException {
-        return ConfigManager.getInstance().enableModule(packageName);
+    public boolean enableModule(String packageName, int userId) throws RemoteException {
+        return ConfigManager.getInstance().enableModule(packageName, userId);
     }
 
     @Override
@@ -312,8 +325,8 @@ public class LSPManagerService extends ILSPManagerService.Stub {
     }
 
     @Override
-    public boolean disableModule(String packageName) {
-        return ConfigManager.getInstance().disableModule(packageName);
+    public boolean disableModule(String packageName, int userId) {
+        return ConfigManager.getInstance().disableModule(packageName, userId);
     }
 
     @Override
@@ -521,6 +534,11 @@ public class LSPManagerService extends ILSPManagerService.Stub {
         } else {
             LSPNotificationManager.cancelStatusNotification();
         }
+    }
+
+    @Override
+    public void removeBlockedScopeRequest(String packageName, int userId) {
+        ConfigManager.getInstance().removeBlockedScopeRequest(packageName, userId);
     }
 
     @Override

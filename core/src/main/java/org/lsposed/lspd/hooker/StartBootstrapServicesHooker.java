@@ -32,14 +32,11 @@ import de.robv.android.xposed.XposedInit;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModuleInterface;
-import io.github.libxposed.api.annotations.BeforeInvocation;
-import io.github.libxposed.api.annotations.XposedHooker;
 
-@XposedHooker
 public class StartBootstrapServicesHooker implements XposedInterface.Hooker {
 
-    @BeforeInvocation
-    public static void beforeHookedMethod() {
+    @Override
+    public Object intercept(XposedInterface.Chain chain) throws Throwable {
         logD("SystemServer#startBootstrapServices() starts");
 
         try {
@@ -53,7 +50,7 @@ public class StartBootstrapServicesHooker implements XposedInterface.Hooker {
             lpparam.isFirstApplication = true;
             XC_LoadPackage.callAll(lpparam);
 
-            LSPosedContext.callOnSystemServerLoaded(new XposedModuleInterface.SystemServerLoadedParam() {
+            LSPosedContext.callOnSystemServerStarting(new XposedModuleInterface.SystemServerStartingParam() {
                 @Override
                 @NonNull
                 public ClassLoader getClassLoader() {
@@ -63,5 +60,6 @@ public class StartBootstrapServicesHooker implements XposedInterface.Hooker {
         } catch (Throwable t) {
             Hookers.logE("error when hooking startBootstrapServices", t);
         }
+        return chain.proceed();
     }
 }
