@@ -21,10 +21,3 @@
 -keepclassmembers,allowoptimization class ** implements io.github.libxposed.api.XposedInterface$Hooker {
     public *** intercept(io.github.libxposed.api.XposedInterface$Chain);
 }
-
--assumenosideeffects class android.util.Log {
-    public static *** v(...);
-    public static *** d(...);
-}
--repackageclasses
--allowaccessmodification
