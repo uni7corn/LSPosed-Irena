@@ -2,6 +2,7 @@ package org.lsposed.lspd.service;
 
 import static org.lsposed.lspd.service.ServiceManager.TAG;
 
+import android.annotation.SuppressLint;
 import android.app.INotificationManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -27,7 +28,9 @@ import android.util.Log;
 import org.lsposed.daemon.R;
 import org.lsposed.lspd.util.FakeContext;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -50,6 +53,37 @@ public class LSPNotificationManager {
 
     private static INotificationManager notificationManager = null;
     private static IBinder binder = null;
+
+    static {
+        try {
+            @SuppressLint("PrivateApi")
+            Class<?> flagsClass = Class.forName("android.app.Flags", false, null);
+            Field featureFlagsField = flagsClass.getDeclaredField("FEATURE_FLAGS");
+            featureFlagsField.setAccessible(true);
+            Object featureFlags = featureFlagsField.get(null);
+            Field cacheField;
+            if (featureFlags != null) {
+                cacheField = featureFlags.getClass().getDeclaredField("systemui_is_cached");
+                cacheField.setAccessible(true);
+                cacheField.set(featureFlags, Boolean.TRUE);
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            Class<?> ConfigClass = Class.forName("com.mediatek.res.AsyncDrawableCache", false, null);
+            Field featureConfigField = ConfigClass.getDeclaredField("sFeatureConfig");
+            featureConfigField.setAccessible(true);
+            featureConfigField.set(null, "0");
+        } catch (Throwable ignored) {
+        }
+        try {
+            new Notification.Builder(new FakeContext(), "LSPosed").build();
+        } catch (AbstractMethodError unused) {
+            FakeContext.ContentResolver = !FakeContext.ContentResolver;
+        } catch (Throwable th) {
+            Log.e(TAG, "failed to build notifications", th);
+        }
+    }
 
     private static final IBinder.DeathRecipient recipient = new IBinder.DeathRecipient() {
         @Override
@@ -197,10 +231,14 @@ public class LSPNotificationManager {
         return PendingIntent.getBroadcast(new FakeContext(), 3, intent, flags);
     }
 
-    private static PendingIntent getModuleScopeIntent(String modulePackageName, int moduleUserId, String scopePackageName, String action, IXposedScopeCallback callback) {
+    private static PendingIntent getModuleScopeIntent(String modulePackageName, int moduleUserId, ArrayList<String> scopePackageNames, String action, IXposedScopeCallback callback) {
         var intent = new Intent(moduleScope);
         intent.setPackage("android");
-        intent.setData(new Uri.Builder().scheme("module").encodedAuthority(modulePackageName + ":" + moduleUserId).encodedPath(scopePackageName).appendQueryParameter("action", action).build());
+        var uriBuilder = new Uri.Builder().scheme("module").encodedAuthority(modulePackageName + ":" + moduleUserId);
+        for (var scopePackageName : scopePackageNames) {
+            uriBuilder.appendPath(scopePackageName);
+        }
+        intent.setData(uriBuilder.appendQueryParameter("action", action).build());
         var extras = new Bundle();
         extras.putBinder("callback", callback.asBinder());
         intent.putExtras(extras);
@@ -262,11 +300,12 @@ public class LSPNotificationManager {
         }
     }
 
-    static void requestModuleScope(String modulePackageName, int moduleUserId, String scopePackageName, IXposedScopeCallback callback) {
+    static void requestModuleScope(String modulePackageName, int moduleUserId, List<String> scopePackageNames, IXposedScopeCallback callback) {
         var context = new FakeContext();
         var userName = UserService.getUserName(moduleUserId);
+        var requestedScopes = new ArrayList<>(scopePackageNames);
         String title = context.getString(R.string.xposed_module_request_scope_title);
-        String content = context.getString(R.string.xposed_module_request_scope_content, modulePackageName, userName, scopePackageName);
+        String content = context.getString(R.string.xposed_module_request_scope_content, modulePackageName, userName, requestedScopes.toString());
 
         var style = new Notification.BigTextStyle();
         style.bigText(content);
@@ -280,21 +319,21 @@ public class LSPNotificationManager {
                 .setAutoCancel(true)
                 .setTimeoutAfter(1000 * 60 * 60)
                 .setStyle(style)
-                .setDeleteIntent(getModuleScopeIntent(modulePackageName, moduleUserId, scopePackageName, "delete", callback))
+                .setDeleteIntent(getModuleScopeIntent(modulePackageName, moduleUserId, requestedScopes, "delete", callback))
                 .setActions(new Notification.Action.Builder(
                                 Icon.createWithResource(context, R.drawable.ic_baseline_check_24),
                                 context.getString(R.string.scope_approve),
-                                getModuleScopeIntent(modulePackageName, moduleUserId, scopePackageName, "approve", callback))
+                                getModuleScopeIntent(modulePackageName, moduleUserId, requestedScopes, "approve", callback))
                                 .build(),
                         new Notification.Action.Builder(
                                 Icon.createWithResource(context, R.drawable.ic_baseline_close_24),
                                 context.getString(R.string.scope_deny),
-                                getModuleScopeIntent(modulePackageName, moduleUserId, scopePackageName, "deny", callback))
+                                getModuleScopeIntent(modulePackageName, moduleUserId, requestedScopes, "deny", callback))
                                 .build(),
                         new Notification.Action.Builder(
                                 Icon.createWithResource(context, R.drawable.ic_baseline_block_24),
                                 context.getString(R.string.nerver_ask_again),
-                                getModuleScopeIntent(modulePackageName, moduleUserId, scopePackageName, "block", callback))
+                                getModuleScopeIntent(modulePackageName, moduleUserId, requestedScopes, "block", callback))
                                 .build()
                 ).build();
         notification.extras.putString("android.substName", "LSPosed");
@@ -305,7 +344,7 @@ public class LSPNotificationManager {
                     notification, 0);
         } catch (RemoteException e) {
             try {
-                callback.onScopeRequestFailed(scopePackageName, e.getMessage());
+                callback.onScopeRequestFailed(e.getMessage());
             } catch (RemoteException ignored) {
             }
             Log.e(TAG, "request module scope", e);

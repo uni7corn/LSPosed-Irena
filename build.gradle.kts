@@ -34,7 +34,6 @@ cmaker {
         arguments.addAll(
             arrayOf(
                 "-DEXTERNAL_ROOT=${File(rootDir.absolutePath, "external")}",
-                "-DCORE_ROOT=${File(rootDir.absolutePath, "core/src/main/jni")}",
                 "-DANDROID_STL=none"
             )
         )
@@ -57,8 +56,8 @@ cmaker {
 }
 
 val repo = jgit.repo()
-val commitCount = (repo?.commitCount("refs/remotes/origin/dev") ?: 1) + 4200
-val latestTag = repo?.latestTag?.removePrefix("v")?.substringBefore("-") ?: "1.9.2"
+val commitCount = (repo?.commitCount("HEAD") ?: 1) + 4200
+val latestTag = repo?.latestTag?.removePrefix("v")?.substringBefore("-") ?: "2.0.0"
 
 val injectedPackageName by extra("com.android.shell")
 val injectedPackageUid by extra(2000)
@@ -66,11 +65,11 @@ val injectedPackageUid by extra(2000)
 val defaultManagerPackageName by extra("org.lsposed.manager")
 val verCode by extra(commitCount)
 val verName by extra(latestTag)
-val androidTargetSdkVersion by extra(35)
+val androidTargetSdkVersion by extra(36)
 val androidMinSdkVersion by extra(27)
-val androidBuildToolsVersion by extra("35.0.0")
-val androidCompileSdkVersion by extra(35)
-val androidCompileNdkVersion by extra("28.0.12433566")
+val androidBuildToolsVersion by extra("36.0.0")
+val androidCompileSdkVersion by extra(36)
+val androidCompileNdkVersion by extra(libs.versions.ndk.get())
 val androidSourceCompatibility by extra(JavaVersion.VERSION_21)
 val androidTargetCompatibility by extra(JavaVersion.VERSION_21)
 val androidCmakeVersion by extra("3.28.0+")
@@ -86,30 +85,21 @@ subprojects {
             ndkVersion = androidCompileNdkVersion
             buildToolsVersion = androidBuildToolsVersion
 
-            externalNativeBuild {
-                cmake {
-                    version = androidCmakeVersion
-                }
+            externalNativeBuild.cmake.version = androidCmakeVersion
+
+            defaultConfig.minSdk = androidMinSdkVersion
+            val applicationDefaultConfig = defaultConfig as? ApplicationDefaultConfig
+            if (applicationDefaultConfig != null) {
+                applicationDefaultConfig.targetSdk = androidTargetSdkVersion
+                applicationDefaultConfig.versionCode = verCode
+                applicationDefaultConfig.versionName = verName
             }
 
-            defaultConfig {
-                minSdk = androidMinSdkVersion
-                if (this is ApplicationDefaultConfig) {
-                    targetSdk = androidTargetSdkVersion
-                    versionCode = verCode
-                    versionName = verName
-                }
-            }
+            lint.abortOnError = true
+            lint.checkReleaseBuilds = false
 
-            lint {
-                abortOnError = true
-                checkReleaseBuilds = false
-            }
-
-            compileOptions {
-                sourceCompatibility = androidSourceCompatibility
-                targetCompatibility = androidTargetCompatibility
-            }
+            compileOptions.sourceCompatibility = androidSourceCompatibility
+            compileOptions.targetCompatibility = androidTargetCompatibility
         }
     }
     plugins.withType(JavaPlugin::class.java) {

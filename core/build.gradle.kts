@@ -28,23 +28,17 @@ android {
     namespace = "org.lsposed.lspd.core"
 
     buildFeatures {
-        androidResources = false
         buildConfig = true
     }
 
-    defaultConfig {
-        consumerProguardFiles("proguard-rules.pro")
+    androidResources {
+        enable = false
+    }
 
+    defaultConfig {
         buildConfigField("String", "FRAMEWORK_NAME", """"${rootProject.name}"""")
         buildConfigField("String", "VERSION_NAME", """"$verName"""")
         buildConfigField("long", "VERSION_CODE", """$verCode""")
-    }
-
-    buildTypes {
-        release {
-            isMinifyEnabled = true
-            proguardFiles("proguard-rules.pro")
-        }
     }
 }
 
@@ -60,7 +54,7 @@ dependencies {
     implementation(libs.commons.lang3)
     implementation(libs.axml)
     implementation(projects.hiddenapi.bridge)
-    implementation(projects.libxposedCompat)
+    implementation(projects.libxposed.compat)
     implementation(projects.services.daemonService)
     implementation(projects.services.managerService)
     compileOnly(libs.androidx.annotation)
